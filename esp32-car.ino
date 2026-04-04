@@ -29,9 +29,9 @@
 #define PWM_BITS       8
 
 // ==================== PID TUNING PARAMETERS ====================
-float Kp = 18.0;      
-float Ki = 0.002;     
-float Kd = 25.0;      
+float Kp = 20.0;      // Slightly increased Kp for sharper response
+float Ki = 0.0;       // Disabled Ki (causes issues on sharp curves)
+float Kd = 30.0;      // Increased Kd to prevent zig-zag from higher Kp
 
 // ==================== SPEED SETTINGS ====================
 int baseSpeed = 255;          
@@ -68,9 +68,10 @@ void setup() {
   ledcAttach(ENA, PWM_FREQ, PWM_BITS);
   ledcAttach(ENB, PWM_FREQ, PWM_BITS);
   
+  stopMotors();
   
   Serial.println("========================================");
-  Serial.println("   ESP32 PID Line Follower Ready (v3)");
+  Serial.println("   ESP32 PID Line Follower (Curve Fix)");
   Serial.println("========================================");
   Serial.println("Place robot on line to start...");
   
@@ -105,14 +106,14 @@ void loop() {
       break;
       
     // ---- LEFT 90 DEGREE TURN (3-4 sensors on left side) ----
-    case 0b00011:  // S1+S2+S3 on line
-    case 0b00001:  // S1+S2+S3+S4 on line  
+    case 0b00011:  
+    case 0b00001:  
       handleLeft90();
       break;
       
     // ---- RIGHT 90 DEGREE TURN (3-4 sensors on right side) ----
-    case 0b11000:  // S3+S4+S5 on line
-    case 0b10000:  // S2+S3+S4+S5 on line
+    case 0b11000:  
+    case 0b10000:  
       handleRight90();
       break;
       
@@ -140,23 +141,27 @@ void loop() {
     lastPrint = millis();
   }
   
-  prevError = error;
+  // Only update prevError if we are actually doing PID (not lost)
+  if(pattern != 0b11111) {
+    prevError = error;
+  }
+  
   delay(0.002);
 }
 
 // ==================== ERROR CALCULATION ====================
 float calculateError(int pattern) {
   switch(pattern) {
-    case 0b11011: return 0;           // Only S3
-    case 0b10011: return -0.7;        // S2+S3
-    case 0b11001: return 0.7;         // S3+S4
-    case 0b10111: return -1.5;        // Only S2
-    case 0b11101: return 1.5;         // Only S4
-    case 0b00111: return -2.5;        // S1+S2
-    case 0b11100: return 2.5;         // S4+S5
-    case 0b01111: return -3.5;        // Only S1
-    case 0b11110: return 3.5;         // Only S5
-    default: return prevError;        // Fallback
+    case 0b11011: return 0;           
+    case 0b10011: return -0.7;        
+    case 0b11001: return 0.7;         
+    case 0b10111: return -1.5;        
+    case 0b11101: return 1.5;         
+    case 0b00111: return -2.5;        
+    case 0b11100: return 2.5;         
+    case 0b01111: return -3.5;        
+    case 0b11110: return 3.5;         
+    default: return prevError;        
   }
 }
 
@@ -171,14 +176,16 @@ void applyPID() {
   float derivative = error - prevError;
   float correction = (Kp * error) + (Ki * integral) + (Kd * derivative);
   
-  // Adaptive speed: slow down for curves automatically
+  // FIX: LESS AGGRESSIVE SLOWDOWN. 
+  // Old code slowed down to 65% on sharp curves, causing it to stop and lose the line.
+  // This keeps momentum up so it carries through sharp curves.
   float absErr = abs(error);
   float speedFactor;
   
   if(absErr <= 0.8)      speedFactor = 1.0;    
-  else if(absErr <= 1.5) speedFactor = 0.90;   
-  else if(absErr <= 2.5) speedFactor = 0.78;   
-  else                   speedFactor = 0.65;   
+  else if(absErr <= 1.5) speedFactor = 0.95;   // Was 0.90
+  else if(absErr <= 2.5) speedFactor = 0.88;   // Was 0.78
+  else                   speedFactor = 0.80;   // Was 0.65 (Keeps moving fast!)
   
   int effectiveSpeed = baseSpeed * speedFactor;
   
@@ -188,8 +195,8 @@ void applyPID() {
   leftSpeed = constrain(leftSpeed, 0, maxSpeed);
   rightSpeed = constrain(rightSpeed, 0, maxSpeed);
   
-  if(leftSpeed > 0 && leftSpeed < 55) leftSpeed = 55;
-  if(rightSpeed > 0 && rightSpeed < 55) rightSpeed = 55;
+  if(leftSpeed > 0 && leftSpeed < 60) leftSpeed = 60;
+  if(rightSpeed > 0 && rightSpeed < 60) rightSpeed = 60;
   
   setMotor(IN1, IN2, ENA, leftSpeed);
   setMotor(IN3, IN4, ENB, rightSpeed);
@@ -199,10 +206,8 @@ void applyPID() {
 void handleLeft90() {
   turnMode = true;
   integral = 0; 
-  
   setMotor(IN1, IN2, ENA, -sharpTurnSpeed);
   setMotor(IN3, IN4, ENB, sharpTurnSpeed + 30);
-  
   error = -5;  
 }
 
@@ -210,10 +215,8 @@ void handleLeft90() {
 void handleRight90() {
   turnMode = true;
   integral = 0;  
-  
   setMotor(IN1, IN2, ENA, sharpTurnSpeed + 30);
   setMotor(IN3, IN4, ENB, -sharpTurnSpeed);
-  
   error = 5;  
 }
 
@@ -225,18 +228,23 @@ void handleCrossJunction() {
   integral = 0;
 }
 
-// ==================== LINE LOST ====================
+// ==================== LINE LOST (SMART MEMORY TURN) ====================
 void handleLineLost() {
   integral = 0;
   
+  // FIX: If it falls off a curve, it remembers which way the curve was going 
+  // and keeps turning that way until it finds the line again.
+  
   if(prevError <= 0) {
-    setMotor(IN1, IN2, ENA, -100);
-    setMotor(IN3, IN4, ENB, 110);
-    error = -6;
+    // Line was last seen on the LEFT. Pivot left to find it again.
+    setMotor(IN1, IN2, ENA, -baseSpeed * 0.6); // Left wheel backwards
+    setMotor(IN3, IN4, ENB, baseSpeed);          // Right wheel forwards
+    error = -6; // Keep error heavily negative
   } else {
-    setMotor(IN1, IN2, ENA, 110);
-    setMotor(IN3, IN4, ENB, -100);
-    error = 6;
+    // Line was last seen on the RIGHT. Pivot right to find it again.
+    setMotor(IN1, IN2, ENA, baseSpeed);          // Left wheel forwards
+    setMotor(IN3, IN4, ENB, -baseSpeed * 0.6);   // Right wheel backwards
+    error = 6; // Keep error heavily positive
   }
 }
 
@@ -260,4 +268,11 @@ void setMotor(int in1Pin, int in2Pin, int pwmPin, int speed) {
 }
 
 // ==================== STOP MOTORS ====================
-// Removed by Chinglen
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  ledcWrite(ENA, 0);
+  ledcWrite(ENB, 0);
+}
