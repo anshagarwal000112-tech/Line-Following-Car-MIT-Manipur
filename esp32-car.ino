@@ -1,158 +1,169 @@
-/*
- * ============================================================
- * ESP32 PID Line Following Robot - Fixed for Arduino Core v3.0+
- * ============================================================
- * Track: Black line on white background
- * Sensors: 0 = Black (line), 1 = White (no line)
- * ============================================================
- */
+#include <L298N.h>
 
-// ==================== PIN DEFINITIONS ====================
-// Motor Driver (L298N)
-#define IN1    21    // Left Motor Direction A
-#define IN2    22    // Left Motor Direction B  
-#define IN3    25    // Right Motor Direction A
-#define IN4    33    // Right Motor Direction B
-#define ENA    23    // Left Motor PWM
-#define ENB    32    // Right Motor PWM
-#define STBY   19    // Motor Driver Enable (HIGH = ON)
+#define IN1    21
+#define IN2    22
+#define ENA    23
+#define IN3    25
+#define IN4    33
+#define ENB    32
+#define STBY   19
 
-// IR Sensors (S1=Leftmost -> S5=Rightmost)
 #define S1     26
 #define S2     27
 #define S3     14
 #define S4     4
 #define S5     13
 
-// ==================== PWM SETTINGS (ESP32 Core 3.0+ Syntax) ====================
-#define PWM_FREQ       5000
-#define PWM_BITS       8
+L298N motor1(ENA, IN1, IN2);
+L298N motor2(ENB, IN3, IN4);
 
-// ==================== PID TUNING PARAMETERS ====================
-float Kp = 20.0;      // Slightly increased Kp for sharper response
-float Ki = 0.0;       // Disabled Ki (causes issues on sharp curves)
-float Kd = 30.0;      // Increased Kd to prevent zig-zag from higher Kp
+float Kp = 15.0;
+float Ki = 0.0;
+float Kd = 55.0;
 
-// ==================== SPEED SETTINGS ====================
-int baseSpeed = 255;          
-int maxSpeed = 255;           
-int sharpTurnSpeed = 255;     
+int baseSpeed = 255;
+int maxSpeed = 255;
+int minMotorSpeed = 60;
 
-// ==================== GLOBAL VARIABLES ====================
+unsigned long prevLoopTime = 0;
+const unsigned long loopInterval = 5000;
+float derivativeFilterAlpha = 0.9;
+float filteredDerivative = 0.0;
+
+int rawPattern = 0b11111;
+int stablePattern = 0b11111;
+int debounceCount = 0;
+const int DEBOUNCE_LIMIT = 3;
+
+enum RobotState { NORMAL_PID, LEFT_90, RIGHT_90, CROSS_JUNC, LOST };
+RobotState state = NORMAL_PID;
+
 float error = 0;
 float prevError = 0;
 float integral = 0;
-bool turnMode = false;
 
-// ==================== SETUP ====================
 void setup() {
   Serial.begin(115200);
-  delay(500);
   
-  // Motor pins
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
   pinMode(STBY, OUTPUT);
   digitalWrite(STBY, HIGH);
   
-  // Sensor pins
-  pinMode(S1, INPUT);
-  pinMode(S2, INPUT);
-  pinMode(S3, INPUT);
-  pinMode(S4, INPUT);
+  pinMode(S1, INPUT); pinMode(S2, INPUT);
+  pinMode(S3, INPUT); pinMode(S4, INPUT);
   pinMode(S5, INPUT);
   
-  // PWM setup for ESP32 Core 3.0+ (New Syntax)
-  ledcAttach(ENA, PWM_FREQ, PWM_BITS);
-  ledcAttach(ENB, PWM_FREQ, PWM_BITS);
+  motor_drive(0, 0);
   
-  stopMotors();
+  Serial.println("Place on line to launch...");
   
-  Serial.println("========================================");
-  Serial.println("   ESP32 PID Line Follower (Curve Fix)");
-  Serial.println("========================================");
-  Serial.println("Place robot on line to start...");
-  
-  // Wait for line detection
-  while(digitalRead(S1) && digitalRead(S2) && digitalRead(S3) && 
-        digitalRead(S4) && digitalRead(S5)) {
-    delay(50);
+  while(readRawSensors() == 0b11111) { 
+    delay(50); 
   }
   
-  Serial.println("Line detected! Starting in 2s...");
-  delay(2000);
+  Serial.println("Line locked! Starting in 2s...");
+  delay(2000); 
+  
+  prevLoopTime = micros();
 }
 
-// ==================== MAIN LOOP ====================
 void loop() {
-  // Read sensors: 0=Black(line), 1=White(no line)
-  int s1 = digitalRead(S1);
-  int s2 = digitalRead(S2);
-  int s3 = digitalRead(S3);
-  int s4 = digitalRead(S4);
-  int s5 = digitalRead(S5);
-  
-  // Create pattern: S1=bit4, S2=bit3, S3=bit2, S4=bit1, S5=bit0
-  int pattern = (s1 << 4) | (s2 << 3) | (s3 << 2) | (s4 << 1) | s5;
-  
-  // ==================== PATTERN HANDLING ====================
-  switch(pattern) {
-    
-    // ---- CROSS JUNCTION (all sensors on line) ----
-    case 0b00000:
-      handleCrossJunction();
-      break;
-      
-    // ---- LEFT 90 DEGREE TURN (3-4 sensors on left side) ----
-    case 0b00011:  
-    case 0b00001:  
-      handleLeft90();
-      break;
-      
-    // ---- RIGHT 90 DEGREE TURN (3-4 sensors on right side) ----
-    case 0b11000:  
-    case 0b10000:  
-      handleRight90();
-      break;
-      
-    // ---- LINE LOST ----
-    case 0b11111:
-      handleLineLost();
-      break;
-      
-    // ---- NORMAL PID LINE FOLLOWING ----
-    default:
-      turnMode = false;
-      error = calculateError(pattern);
-      applyPID();
-      break;
+  unsigned long currentTime = micros();
+  if (currentTime - prevLoopTime < loopInterval) {
+    return; 
   }
+  prevLoopTime = currentTime;
+
+  rawPattern = readRawSensors();
+  updateDebounce();
   
-  // Debug output
-  static unsigned long lastPrint = 0;
-  if(millis() - lastPrint >= 100) {
-    Serial.print("S:");
-    Serial.print(s1);Serial.print(s2);Serial.print(s3);
-    Serial.print(s4);Serial.print(s5);
-    Serial.print(" Err:"); Serial.print(error,1);
-    Serial.print(" "); Serial.println(turnMode ? "TURN" : "PID");
-    lastPrint = millis();
+  switch(state) {
+    case NORMAL_PID: handleNormalPID(); break;
+    case LEFT_90:    handleLeft90(); break;
+    case RIGHT_90:   handleRight90(); break;
+    case CROSS_JUNC: handleCrossJunction(); break;
+    case LOST:       handleLineLost(); break;
   }
-  
-  // Only update prevError if we are actually doing PID (not lost)
-  if(pattern != 0b11111) {
-    prevError = error;
-  }
-  
-  delay(0.002);
 }
 
-// ==================== ERROR CALCULATION ====================
+int readRawSensors() {
+  return (digitalRead(S1) << 4) | (digitalRead(S2) << 3) | 
+         (digitalRead(S3) << 2) | (digitalRead(S4) << 1) | digitalRead(S5);
+}
+
+void updateDebounce() {
+  bool isSpecialCase = (rawPattern == 0b00000 || rawPattern == 0b00011 || 
+                        rawPattern == 0b00001 || rawPattern == 0b11000 || 
+                        rawPattern == 0b10000 || rawPattern == 0b11111);
+
+  if (isSpecialCase) {
+    if (rawPattern == stablePattern) debounceCount++;
+    else { stablePattern = rawPattern; debounceCount = 1; }
+  } else {
+    stablePattern = rawPattern;
+    debounceCount = 0;
+  }
+}
+
+void handleNormalPID() {
+  if (debounceCount >= DEBOUNCE_LIMIT) {
+    switch(stablePattern) {
+      case 0b00000: state = CROSS_JUNC; return;
+      case 0b00011: 
+      case 0b00001: state = LEFT_90; return;
+      case 0b11000: 
+      case 0b10000: state = RIGHT_90; return;
+      case 0b11111: state = LOST; return;
+    }
+  }
+
+  float newError = calculateError(stablePattern);
+  
+  if (abs(newError - error) > 2.0) {
+    error = newError * 0.5; 
+    prevError = error;      
+  } else {
+    error = newError;
+  }
+  
+  applyPID();
+  prevError = error;
+}
+
+void handleLeft90() {
+  integral = 0; filteredDerivative = 0; error = -5.0;
+  motor_drive(-140, 170);
+  if (stablePattern != 0b00011 && stablePattern != 0b00001) {
+    state = NORMAL_PID; prevError = -5.0; 
+  }
+}
+
+void handleRight90() {
+  integral = 0; filteredDerivative = 0; error = 5.0;
+  motor_drive(170, -140);
+  if (stablePattern != 0b11000 && stablePattern != 0b10000) {
+    state = NORMAL_PID; prevError = 5.0; 
+  }
+}
+
+void handleCrossJunction() {
+  integral = 0; filteredDerivative = 0; error = 0;
+  motor_drive(baseSpeed, baseSpeed);
+  if (stablePattern != 0b00000) { state = NORMAL_PID; prevError = 0; }
+}
+
+void handleLineLost() {
+  integral = 0; filteredDerivative = 0;
+  if (prevError <= 0) {
+    motor_drive(-baseSpeed * 0.6, baseSpeed); error = -6.0;
+  } else {
+    motor_drive(baseSpeed, -baseSpeed * 0.6); error = 6.0;
+  }
+  if (stablePattern != 0b11111) { state = NORMAL_PID; }
+}
+
 float calculateError(int pattern) {
   switch(pattern) {
-    case 0b11011: return 0;           
+    case 0b11011: return 0.0;           
     case 0b10011: return -0.7;        
     case 0b11001: return 0.7;         
     case 0b10111: return -1.5;        
@@ -161,118 +172,53 @@ float calculateError(int pattern) {
     case 0b11100: return 2.5;         
     case 0b01111: return -3.5;        
     case 0b11110: return 3.5;         
-    default: return prevError;        
+    default: return prevError; 
   }
 }
 
-// ==================== PID CONTROL ====================
 void applyPID() {
   integral += error;
   if(integral > 30) integral = 30;
   if(integral < -30) integral = -30;
-  
   if(abs(error) < 0.5) integral *= 0.95;
   
-  float derivative = error - prevError;
-  float correction = (Kp * error) + (Ki * integral) + (Kd * derivative);
+  float rawDerivative = error - prevError;
+  filteredDerivative = (derivativeFilterAlpha * rawDerivative) + ((1.0 - derivativeFilterAlpha) * filteredDerivative);
+  float correction = (Kp * error) + (Ki * integral) + (Kd * filteredDerivative);
   
-  // FIX: LESS AGGRESSIVE SLOWDOWN. 
-  // Old code slowed down to 65% on sharp curves, causing it to stop and lose the line.
-  // This keeps momentum up so it carries through sharp curves.
   float absErr = abs(error);
-  float speedFactor;
-  
-  if(absErr <= 0.8)      speedFactor = 1.0;    
-  else if(absErr <= 1.5) speedFactor = 0.95;   // Was 0.90
-  else if(absErr <= 2.5) speedFactor = 0.88;   // Was 0.78
-  else                   speedFactor = 0.80;   // Was 0.65 (Keeps moving fast!)
+  float speedFactor = (absErr <= 0.8) ? 1.0 : (absErr <= 1.5) ? 0.95 : (absErr <= 2.5) ? 0.88 : 0.82;   
   
   int effectiveSpeed = baseSpeed * speedFactor;
+  int leftSpeed = constrain(effectiveSpeed + correction, 0, maxSpeed);
+  int rightSpeed = constrain(effectiveSpeed - correction, 0, maxSpeed);
   
-  int leftSpeed = effectiveSpeed + correction;
-  int rightSpeed = effectiveSpeed - correction;
+  if(leftSpeed > 0 && leftSpeed < minMotorSpeed) leftSpeed = minMotorSpeed;
+  if(rightSpeed > 0 && rightSpeed < minMotorSpeed) rightSpeed = minMotorSpeed;
   
-  leftSpeed = constrain(leftSpeed, 0, maxSpeed);
-  rightSpeed = constrain(rightSpeed, 0, maxSpeed);
-  
-  if(leftSpeed > 0 && leftSpeed < 60) leftSpeed = 60;
-  if(rightSpeed > 0 && rightSpeed < 60) rightSpeed = 60;
-  
-  setMotor(IN1, IN2, ENA, leftSpeed);
-  setMotor(IN3, IN4, ENB, rightSpeed);
+  motor_drive(leftSpeed, rightSpeed);
 }
 
-// ==================== LEFT 90 DEGREE TURN ====================
-void handleLeft90() {
-  turnMode = true;
-  integral = 0; 
-  setMotor(IN1, IN2, ENA, -sharpTurnSpeed);
-  setMotor(IN3, IN4, ENB, sharpTurnSpeed + 30);
-  error = -5;  
-}
-
-// ==================== RIGHT 90 DEGREE TURN ====================
-void handleRight90() {
-  turnMode = true;
-  integral = 0;  
-  setMotor(IN1, IN2, ENA, sharpTurnSpeed + 30);
-  setMotor(IN3, IN4, ENB, -sharpTurnSpeed);
-  error = 5;  
-}
-
-// ==================== CROSS JUNCTION ====================
-void handleCrossJunction() {
-  setMotor(IN1, IN2, ENA, baseSpeed);
-  setMotor(IN3, IN4, ENB, baseSpeed);
-  error = 0;
-  integral = 0;
-}
-
-// ==================== LINE LOST (SMART MEMORY TURN) ====================
-void handleLineLost() {
-  integral = 0;
-  
-  // FIX: If it falls off a curve, it remembers which way the curve was going 
-  // and keeps turning that way until it finds the line again.
-  
-  if(prevError <= 0) {
-    // Line was last seen on the LEFT. Pivot left to find it again.
-    setMotor(IN1, IN2, ENA, -baseSpeed * 0.6); // Left wheel backwards
-    setMotor(IN3, IN4, ENB, baseSpeed);          // Right wheel forwards
-    error = -6; // Keep error heavily negative
+void motor_drive(int leftSpeed, int rightSpeed) {
+  if (leftSpeed > 0) {
+    motor1.setSpeed(constrain(leftSpeed, 0, 255));
+    motor1.forward();
+  } else if (leftSpeed < 0) {
+    motor1.setSpeed(constrain(abs(leftSpeed), 0, 255));
+    motor1.backward();
   } else {
-    // Line was last seen on the RIGHT. Pivot right to find it again.
-    setMotor(IN1, IN2, ENA, baseSpeed);          // Left wheel forwards
-    setMotor(IN3, IN4, ENB, -baseSpeed * 0.6);   // Right wheel backwards
-    error = 6; // Keep error heavily positive
+    motor1.setSpeed(0);
+    motor1.stop();
   }
-}
 
-// ==================== SET MOTOR SPEED ====================
-void setMotor(int in1Pin, int in2Pin, int pwmPin, int speed) {
-  if(speed > 0) {
-    digitalWrite(in1Pin, HIGH);
-    digitalWrite(in2Pin, LOW);
-    ledcWrite(pwmPin, constrain(speed, 0, 255));
-  } 
-  else if(speed < 0) {
-    digitalWrite(in1Pin, LOW);
-    digitalWrite(in2Pin, HIGH);
-    ledcWrite(pwmPin, constrain(-speed, 0, 255));
-  } 
-  else {
-    digitalWrite(in1Pin, LOW);
-    digitalWrite(in2Pin, LOW);
-    ledcWrite(pwmPin, 0);
+  if (rightSpeed > 0) {
+    motor2.setSpeed(constrain(rightSpeed, 0, 255));
+    motor2.forward();
+  } else if (rightSpeed < 0) {
+    motor2.setSpeed(constrain(abs(rightSpeed), 0, 255));
+    motor2.backward();
+  } else {
+    motor2.setSpeed(0);
+    motor2.stop();
   }
-}
-
-// ==================== STOP MOTORS ====================
-void stopMotors() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, LOW);
-  ledcWrite(ENA, 0);
-  ledcWrite(ENB, 0);
 }
