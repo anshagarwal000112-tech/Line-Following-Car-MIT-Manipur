@@ -92,7 +92,9 @@ The robot successfully performs:
 
 ## 📸 Project Images
 
-(Add your robot images here)
+<img width="960" height="1280" alt="PHOTO-2026-06-23-20-53-27" src="https://github.com/user-attachments/assets/804ac728-102f-4115-8f02-b53d27e8a230" />
+<img width="960" height="1280" alt="PHOTO-2026-06-23-20-53-40" src="https://github.com/user-attachments/assets/69bc6aa7-3993-4a38-a6ee-ce4278ce43b4" />
+
 
 ---
 
