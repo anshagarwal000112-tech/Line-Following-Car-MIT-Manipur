@@ -75,7 +75,6 @@ The power system provides enough power for the ESP32, sensors, and motors.
 - Tested motor movement
 - Tuned sensor logic
 
-The complete robot was built and made functional in around **1 hour**.
 
 ---
 
