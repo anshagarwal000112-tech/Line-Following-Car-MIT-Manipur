@@ -6,7 +6,7 @@ I designed, coded, assembled, and tested the robot myself. After testing and tun
 
 ---
 
-## 🚀 Features
+Features
 
 * ESP32 as the main controller
 * 5 digital IR sensors
@@ -108,5 +108,6 @@ This project was mainly about making a working line follower from the parts I ha
 
 After assembling everything, writing the code, and doing the tuning, the final robot was able to follow the track and handle curves, loops, and 90° turns.
 
+<img width="675" height="900" alt="image" src="https://github.com/user-attachments/assets/c388d2d0-d45c-4e41-8f74-a1deaf96759f" />
 
 
