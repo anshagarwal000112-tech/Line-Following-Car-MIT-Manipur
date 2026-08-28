@@ -1,0 +1,10 @@
+Component,Quantity,Specification,Purpose,Link,
+ESP32,1,ESP32 development board,Main controller,https://amzn.in/d/000gPE5C,
+5 IR Digital Sensor Array,1,Digital IR line sensor,Detects the line,https://robu.in/product/tcrt5000l-5-channel-tracking-sensor-tracking-module-infrared-sensor/?gad_source=1&gad_campaignid=17416544847&gbraid=0AAAAADvLFWfBUeJDOoM6Tp6VZHxabnkmV&gclid=CjwKCAjw48TUBhBREiwAK0GnQTPGKD24POQkduaWwxhNrQ7D8v3izKko_QPn7gqfaw--rqtaV9gzYxoCigQQAvD_BwE,
+L298N Motor Driver,1,L298N dual H-bridge,Controls the motors,https://amzn.in/d/0aBPakBK,
+BO Motor,2,300 RPM,Drives the robot,https://amzn.in/d/0dJWOtTq,
+Li-ion Battery,2,3.7V 2200mAh,Power source,https://amzn.in/d/0fML3ss2,
+Buck Converter,1,DC-DC buck converter,Voltage regulation,https://amzn.in/d/0chZViDC,
+Robot Chassis,1,Line follower chassis,Holds the robot components,https://amzn.in/d/062Gwqwp,
+Wheel,2,Robot wheel,Transfers motor power to the track,https://amzn.in/d/062Gwqwp,
+Caster Wheel,1,Robot caster,Supports the front/rear of the robot,,https://amzn.in/d/03LAIODR
